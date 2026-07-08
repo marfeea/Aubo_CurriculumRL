@@ -1,0 +1,4 @@
+interface:
+  display_name: 'CurriculumRL Engineering Guardrails'
+  short_description: 'Architecture, change, and validation constraints'
+  default_prompt: 'Use $project-engineering-guardrails to implement this CurriculumRL change with the project engineering constraints.'
