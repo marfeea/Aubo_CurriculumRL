@@ -1,0 +1,4 @@
+interface:
+  display_name: "项目机理知识沉淀"
+  short_description: "基于仓库证据回答控制与训练机理问题并持续沉淀项目理解知识"
+  default_prompt: "Use $project-mechanism-knowledge to explain this project mechanism with repository evidence and update the project understanding document."
