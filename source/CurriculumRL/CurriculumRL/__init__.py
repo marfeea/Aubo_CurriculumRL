@@ -7,8 +7,23 @@
 Python module serving as a project/extension template.
 """
 
-# Register Gym environments.
-from .tasks import *
 
-# Register UI extensions.
-from .ui_extension_example import *
+def _missing_optional_runtime(error: ModuleNotFoundError) -> bool:
+    """判断导入失败是否仅由未启动 Isaac 运行环境造成。"""
+
+    module_root = (error.name or "").split(".", maxsplit=1)[0]
+    return module_root in {"carb", "gymnasium", "isaaclab", "isaaclab_tasks", "omni", "pxr"}
+
+
+# Isaac 启动环境中保持模板的自动注册行为；纯配置检查不强制加载 Isaac。
+try:
+    from .tasks import *  # noqa: F403
+except ModuleNotFoundError as error:
+    if not _missing_optional_runtime(error):
+        raise
+
+try:
+    from .ui_extension_example import *  # noqa: F403
+except ModuleNotFoundError as error:
+    if not _missing_optional_runtime(error):
+        raise

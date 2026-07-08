@@ -42,6 +42,10 @@ docker/.container.cfg
 **/.neptune/*
 docker/artifacts/
 *.tmp
+/checkpoints/
+/data/
+/logs/
+/renders/
 
 # Doc Outputs
 **/docs/_build/*
@@ -63,9 +67,6 @@ _build
 
 # Teleop Recorded Dataset
 /datasets/
-
-# Tests
-tests/
 
 # Docker history
 .isaac-lab-docker-history
