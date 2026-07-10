@@ -14,8 +14,11 @@ from ...configs.scene import (
     ARM_INITIAL_JOINT_POSITIONS,
     AUBO_2_LOCAL_POSITION_STATION,
     AUBO_LOCAL_POSITION_STATION,
+    ENABLE_SELF_COLLISIONS,
     GRIPPER_ACTUATOR,
     GRIPPER_INITIAL_JOINT_POSITIONS,
+    SOLVER_POSITION_ITERATIONS,
+    SOLVER_VELOCITY_ITERATIONS,
     WORKSTATION_POSE_E,
 )
 from ...configs.task import TARGET_STATES
@@ -52,6 +55,11 @@ def _robot_usd_cfg(entity_name: str, local_position: tuple[float, float, float])
         spawn=sim_utils.UsdFileCfg(
             usd_path=str(asset_path(asset_by_key("aubo_with_gripper"))),
             activate_contact_sensors=True,
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                enabled_self_collisions=ENABLE_SELF_COLLISIONS,
+                solver_position_iteration_count=SOLVER_POSITION_ITERATIONS,
+                solver_velocity_iteration_count=SOLVER_VELOCITY_ITERATIONS,
+            ),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
             pos=workstation_local_to_env_position(local_position),

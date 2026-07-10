@@ -9,6 +9,10 @@
 
 import argparse
 
+from _bootstrap import add_package_source
+
+add_package_source()
+
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
@@ -18,6 +22,7 @@ parser.add_argument(
 )
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument("--steps", type=int, default=None, help="Exit after this many environment steps.")
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -29,13 +34,12 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import CurriculumRL.tasks  # noqa: F401
 import gymnasium as gym
 import torch
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
-
-import CurriculumRL.tasks  # noqa: F401
 
 
 def main():
@@ -52,6 +56,7 @@ def main():
     print(f"[INFO]: Gym action space: {env.action_space}")
     # reset environment
     env.reset()
+    step = 0
     # simulate environment
     while simulation_app.is_running():
         # run everything in inference mode
@@ -60,6 +65,9 @@ def main():
             actions = 2 * torch.rand(env.action_space.shape, device=env.unwrapped.device) - 1
             # apply actions
             env.step(actions)
+        step += 1
+        if args_cli.steps is not None and step >= args_cli.steps:
+            break
 
     # close the simulator
     env.close()

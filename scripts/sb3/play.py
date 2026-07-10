@@ -8,8 +8,17 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import re
 import sys
 from pathlib import Path
+
+SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
+
+from _bootstrap import add_package_source  # noqa: E402
+
+add_package_source()
 
 from isaaclab.app import AppLauncher
 
@@ -38,6 +47,7 @@ parser.add_argument(
     help="When no checkpoint provided, use the last saved model. Otherwise use the best saved model.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument("--steps", type=int, default=None, help="Exit after this many policy steps.")
 parser.add_argument(
     "--keep_all_info",
     action="store_true",
@@ -65,6 +75,7 @@ import os
 import random
 import time
 
+import CurriculumRL.tasks  # noqa: F401
 import gymnasium as gym
 import torch
 from stable_baselines3 import PPO
@@ -85,8 +96,6 @@ from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_che
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
 from isaaclab_tasks.utils.parse_cfg import get_checkpoint_path
-
-import CurriculumRL.tasks  # noqa: F401
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -119,9 +128,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     elif args_cli.checkpoint is None:
         # FIXME: last checkpoint doesn't seem to really use the last one'
         if args_cli.use_last_checkpoint:
-            checkpoint = "model_.*.zip"
+            checkpoint = ".*_model_.*_steps.zip"
         else:
-            checkpoint = "model.zip"
+            checkpoint = ".*_model.zip"
         checkpoint_path = get_checkpoint_path(log_root_path, ".*", checkpoint, sort_alpha=False)
     else:
         checkpoint_path = args_cli.checkpoint
@@ -154,8 +163,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap around environment for stable baselines
     env = Sb3VecEnvWrapper(env, fast_variant=not args_cli.keep_all_info)
 
-    vec_norm_path = checkpoint_path.replace("/model", "/model_vecnormalize").replace(".zip", ".pkl")
-    vec_norm_path = Path(vec_norm_path)
+    checkpoint_path = Path(checkpoint_path)
+    periodic_match = re.fullmatch(r"(.+_model)_(\d+_steps)", checkpoint_path.stem)
+    if periodic_match:
+        vec_norm_name = f"{periodic_match.group(1)}_vecnormalize_{periodic_match.group(2)}.pkl"
+    else:
+        vec_norm_name = f"{checkpoint_path.stem}_vecnormalize.pkl"
+    vec_norm_path = checkpoint_path.with_name(vec_norm_name)
 
     # normalize environment (if needed)
     if vec_norm_path.exists():
@@ -191,11 +205,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             actions, _ = agent.predict(obs, deterministic=True)
             # env stepping
             obs, _, _, _ = env.step(actions)
+        timestep += 1
         if args_cli.video:
-            timestep += 1
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
+        if args_cli.steps is not None and timestep >= args_cli.steps:
+            break
 
         # time delay for real-time evaluation
         sleep_time = dt - (time.time() - start_time)

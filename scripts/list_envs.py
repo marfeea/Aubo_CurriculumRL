@@ -17,6 +17,10 @@ with `Isaac` in their name.
 
 import argparse
 
+from _bootstrap import add_package_source
+
+add_package_source()
+
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
@@ -32,10 +36,9 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import CurriculumRL.tasks  # noqa: F401
 import gymnasium as gym
 from prettytable import PrettyTable
-
-import CurriculumRL.tasks  # noqa: F401
 
 
 def main():
@@ -52,13 +55,13 @@ def main():
     index = 0
     # acquire all Isaac environments names
     for task_spec in gym.registry.values():
-        if "Template-" in task_spec.id and (args_cli.keyword is None or args_cli.keyword in task_spec.id):
+        if "CurriculumRL" in task_spec.id and (args_cli.keyword is None or args_cli.keyword in task_spec.id):
             # add details to table
             table.add_row([index + 1, task_spec.id, task_spec.entry_point, task_spec.kwargs["env_cfg_entry_point"]])
             # increment count
             index += 1
 
-    print(table)
+    print(table, flush=True)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,11 @@ class TcpDockingDynamicSceneCfg(TcpDockingStaticSceneCfg):
 
     ws_interactive_reagent_01_sample_bottle = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/station/interactive/ws_interactive_reagent_01_sample_bottle",
-        spawn=sim_utils.UsdFileCfg(usd_path=str(asset_path(asset_by_key("sample_bottle")))),
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=str(asset_path(asset_by_key("sample_bottle"))),
+            # 阶段 D L0 固定目标姿态；阶段 E 才启用可扰动目标分布。
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+        ),
         init_state=RigidObjectCfg.InitialStateCfg(
             pos=TARGET_STATES[0].position_e,
             rot=TARGET_STATES[0].rotation_wxyz,

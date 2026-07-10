@@ -10,9 +10,18 @@
 
 import argparse
 import contextlib
+import re
 import signal
 import sys
 from pathlib import Path
+
+SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
+
+from _bootstrap import add_package_source  # noqa: E402
+
+add_package_source()
 
 from isaaclab.app import AppLauncher
 
@@ -30,6 +39,9 @@ parser.add_argument("--seed", type=int, default=None, help="Seed used for the en
 parser.add_argument("--log_interval", type=int, default=100_000, help="Log data every n timesteps.")
 parser.add_argument("--checkpoint", type=str, default=None, help="Continue the training from checkpoint.")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument("--rollout-steps", type=int, default=None, help="Override PPO rollout length for smoke runs.")
+parser.add_argument("--run-tag", type=str, default="baseline", help="Stable label included in logs and checkpoints.")
+parser.add_argument("--curriculum-level", type=int, default=0, help="Curriculum level recorded in run metadata.")
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument(
     "--keep_all_info",
@@ -110,6 +122,10 @@ import CurriculumRL.tasks  # noqa: F401
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     """Train with stable-baselines agent."""
+    if args_cli.curriculum_level != 0 and args_cli.task == "CurriculumRL-TcpDocking-v0":
+        raise ValueError("阶段 D 任务只允许 curriculum level 0；阶段 E 才启用等级切换")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", args_cli.run_tag):
+        raise ValueError("--run-tag 只能包含字母、数字、点、下划线和连字符")
     # randomly sample a seed if seed = -1
     if args_cli.seed == -1:
         args_cli.seed = random.randint(0, 10000)
@@ -117,6 +133,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     agent_cfg["seed"] = args_cli.seed if args_cli.seed is not None else agent_cfg["seed"]
+    if args_cli.rollout_steps is not None:
+        if args_cli.rollout_steps < 2:
+            raise ValueError("PPO --rollout-steps 必须至少为 2")
+        agent_cfg["n_steps"] = args_cli.rollout_steps
+        agent_cfg["batch_size"] = min(agent_cfg["batch_size"], args_cli.rollout_steps * env_cfg.scene.num_envs)
     # max iterations for training
     if args_cli.max_iterations is not None:
         agent_cfg["n_timesteps"] = args_cli.max_iterations * agent_cfg["n_steps"] * env_cfg.scene.num_envs
@@ -127,7 +148,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
     # directory for logging into
-    run_info = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_info = f"L{args_cli.curriculum_level}_seed{agent_cfg['seed']}_{args_cli.run_tag}_{timestamp}"
     log_root_path = os.path.abspath(os.path.join("logs", "sb3", args_cli.task))
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
     # The Ray Tune workflow extracts experiment name using the logging line below, hence,
@@ -137,10 +159,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+    dump_yaml(
+        os.path.join(log_dir, "params", "run.yaml"),
+        {
+            "task": args_cli.task,
+            "curriculum_level": args_cli.curriculum_level,
+            "seed": agent_cfg["seed"],
+            "run_tag": args_cli.run_tag,
+            "env_config_snapshot": "params/env.yaml",
+            "agent_config_snapshot": "params/agent.yaml",
+        },
+    )
 
     # save command used to run the script
     command = " ".join(sys.orig_argv)
-    (Path(log_dir) / "command.txt").write_text(command)
+    (Path(log_dir) / "command.txt").write_text(command, encoding="utf-8")
 
     # post-process agent configuration
     agent_cfg = process_sb3_cfg(agent_cfg, env_cfg.scene.num_envs)
@@ -207,7 +240,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         agent = agent.load(args_cli.checkpoint, env, print_system_info=True)
 
     # callbacks for agent
-    checkpoint_callback = CheckpointCallback(save_freq=1000, save_path=log_dir, name_prefix="model", verbose=2)
+    task_slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", args_cli.task)
+    checkpoint_prefix = f"{task_slug}_L{args_cli.curriculum_level}_seed{agent_cfg['seed']}_{args_cli.run_tag}_model"
+    checkpoint_callback = CheckpointCallback(
+        save_freq=1000,
+        save_path=log_dir,
+        name_prefix=checkpoint_prefix,
+        save_vecnormalize=True,
+        verbose=2,
+    )
     callbacks = [checkpoint_callback, LogEveryNTimesteps(n_steps=args_cli.log_interval)]
 
     # train the agent
@@ -219,13 +260,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             log_interval=None,
         )
     # save the final model
-    agent.save(os.path.join(log_dir, "model"))
+    agent.save(os.path.join(log_dir, checkpoint_prefix))
     print("Saving to:")
-    print(os.path.join(log_dir, "model.zip"))
+    print(os.path.join(log_dir, f"{checkpoint_prefix}.zip"))
 
     if isinstance(env, VecNormalize):
         print("Saving normalization")
-        env.save(os.path.join(log_dir, "model_vecnormalize.pkl"))
+        env.save(os.path.join(log_dir, f"{checkpoint_prefix}_vecnormalize.pkl"))
 
     print(f"Training time: {round(time.time() - start_time, 2)} seconds")
 

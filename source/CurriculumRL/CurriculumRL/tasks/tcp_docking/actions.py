@@ -7,6 +7,9 @@ from typing import Any
 
 import torch
 
+from isaaclab.managers import ActionTerm, ActionTermCfg
+from isaaclab.utils import configclass
+
 from ...configs.assets import ROBOT_PRIM_CONTRACT
 from ...configs.differential_ik import (
     ACTION_CLIP,
@@ -223,3 +226,44 @@ class DifferentialIKAction:
             max_joint_velocity_rad_s=MAX_JOINT_VELOCITY_RAD_S,
             joint_position_margin_rad=JOINT_POSITION_MARGIN_RAD,
         )
+
+
+class DifferentialIKActionTerm(ActionTerm):
+    """将阶段 C 控制器接入 Manager-Based 动作生命周期。"""
+
+    cfg: DifferentialIKActionTermCfg
+
+    def __init__(self, cfg: DifferentialIKActionTermCfg, env: Any):
+        super().__init__(cfg, env)
+        self.controller = DifferentialIKAction(
+            self._asset,
+            env.physics_dt,
+            diagnostics_enabled=cfg.diagnostics_enabled,
+        )
+
+    @property
+    def action_dim(self) -> int:
+        return 6
+
+    @property
+    def raw_actions(self) -> torch.Tensor:
+        return self.controller.raw_action
+
+    @property
+    def processed_actions(self) -> torch.Tensor:
+        return self.controller.processed_action
+
+    def process_actions(self, actions: torch.Tensor) -> None:
+        self.controller.process_actions(actions)
+
+    def apply_actions(self) -> None:
+        self.controller.apply_actions()
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        self.controller.reset(env_ids)
+
+
+@configclass
+class DifferentialIKActionTermCfg(ActionTermCfg):
+    class_type: type[ActionTerm] = DifferentialIKActionTerm
+    diagnostics_enabled: bool = False
