@@ -6,14 +6,15 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from .runtime_state import compute_step
+from .runtime_state import auxiliary_reward_scales, compute_step
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
 def _component(env: ManagerBasedRLEnv, name: str) -> torch.Tensor:
-    return getattr(compute_step(env)[1], name)
+    values = getattr(compute_step(env)[1], name)
+    return values * auxiliary_reward_scales(env, name)
 
 
 def distance_progress(env: ManagerBasedRLEnv) -> torch.Tensor:

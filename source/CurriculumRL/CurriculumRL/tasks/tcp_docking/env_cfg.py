@@ -1,4 +1,4 @@
-"""阶段 D L0：固定目标 TCP 停靠 Manager-Based 环境。"""
+"""阶段 E：课程目标采样 TCP 停靠 Manager-Based 环境。"""
 
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
@@ -57,7 +57,7 @@ class EventCfg:
         mode="reset",
         params={"reset_joint_targets": True},
     )
-    reset_fixed_target = EventTerm(func=mdp.reset_fixed_l0_target, mode="reset")
+    reset_curriculum_target = EventTerm(func=mdp.reset_curriculum_target, mode="reset")
 
 
 @configclass
@@ -90,6 +90,10 @@ class TcpDockingEnvCfg(ManagerBasedRLEnvCfg):
     events: EventCfg = EventCfg()
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
+    curriculum_enabled: bool = True
+    curriculum_initial_level: int = 0
+    evaluation_target_state_index: int | None = None
+    evaluation_curriculum_level: int = 4
 
     def __post_init__(self) -> None:
         self.decimation = POLICY_DECIMATION

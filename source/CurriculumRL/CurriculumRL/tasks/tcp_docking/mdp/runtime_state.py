@@ -8,6 +8,7 @@ from typing import Any
 import torch
 
 from ....configs.assets import ROBOT_PRIM_CONTRACT, SCENE_ENTITY_AUBO, SCENE_ENTITY_TARGET
+from ....configs.curriculum import CURRICULUM_CFG
 from ....configs.rewards import (
     ORIENTATION_QUALITY_SCALE_RAD,
     PROXIMITY_LENGTH_SCALE_M,
@@ -29,6 +30,7 @@ from ....configs.task import (
     TCP_WORKSPACE_B,
     TOOL_FORWARD_AXIS,
 )
+from ....logic.curriculum_state import CurriculumController, EpisodeResult
 from ....logic.orientation import tool_axis_alignment
 from ....logic.parking_state import ParkingState, initial_parking_state, update_parking_state
 from ....logic.reset_state import ResetCache, commit_target_readback, create_reset_cache, prepare_target_reset
@@ -64,6 +66,15 @@ class TcpDockingRuntimeState:
     parking_state: ParkingState
     reward_state: RewardState
     last_step: torch.Tensor
+    curriculum: CurriculumController
+    episode_level: torch.Tensor
+    episode_active: torch.Tensor
+    completed_position_error_m: torch.Tensor
+    completed_orientation_error_rad: torch.Tensor
+    completed_tcp_speed_m_s: torch.Tensor
+    completed_success: torch.Tensor
+    completed_safety_failure: torch.Tensor
+    completed_timeout: torch.Tensor
     metrics: StepMetrics | None = None
     rewards: RewardComponents | None = None
 
@@ -80,6 +91,15 @@ def get_runtime(env: Any) -> TcpDockingRuntimeState:
         parking_state=initial_parking_state(env.num_envs, device=env.device),
         reward_state=create_reward_state(env.num_envs, device=env.device),
         last_step=torch.full((env.num_envs,), -1, dtype=torch.long, device=env.device),
+        curriculum=CurriculumController(CURRICULUM_CFG, level=int(getattr(env.cfg, "curriculum_initial_level", 0))),
+        episode_level=torch.zeros(env.num_envs, dtype=torch.long, device=env.device),
+        episode_active=torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
+        completed_position_error_m=torch.full((env.num_envs,), torch.nan, device=env.device),
+        completed_orientation_error_rad=torch.full((env.num_envs,), torch.nan, device=env.device),
+        completed_tcp_speed_m_s=torch.full((env.num_envs,), torch.nan, device=env.device),
+        completed_success=torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
+        completed_safety_failure=torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
+        completed_timeout=torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
     )
     env._tcp_docking_runtime = state
     return state
@@ -97,6 +117,91 @@ def reset_runtime(env: Any, env_ids: torch.Tensor, state_indices: torch.Tensor) 
 
     reset_reward_state(state.reward_state, env_ids)
     state.metrics = None
+
+
+def reset_curriculum_runtime(env: Any, env_ids: torch.Tensor) -> None:
+    """结算旧 episode 后切换一次全局课程，并为 reset 环境采样下一目标。"""
+
+    state = get_runtime(env)
+    _record_completed_episodes(env, state, env_ids)
+    if getattr(env.cfg, "curriculum_enabled", True):
+        level = state.curriculum.level
+        probabilities = torch.tensor(
+            CURRICULUM_CFG.levels[level].target_state_probabilities,
+            dtype=env.scene.env_origins.dtype,
+            device=env.device,
+        )
+        state_indices = torch.multinomial(probabilities, env_ids.numel(), replacement=True)
+        state.episode_level[env_ids] = state.curriculum.level
+    else:
+        forced_index = getattr(env.cfg, "evaluation_target_state_index", None)
+        if forced_index is None or not 0 <= forced_index < len(TARGET_STATES):
+            raise ValueError("固定评估必须指定有效的 evaluation_target_state_index")
+        evaluation_level = getattr(env.cfg, "evaluation_curriculum_level", len(CURRICULUM_CFG.levels) - 1)
+        if not 0 <= evaluation_level < len(CURRICULUM_CFG.levels):
+            raise ValueError("固定评估必须指定有效的 evaluation_curriculum_level")
+        state_indices = torch.full_like(env_ids, forced_index)
+        state.episode_level[env_ids] = evaluation_level
+    state.episode_active[env_ids] = True
+    reset_runtime(env, env_ids, state_indices)
+
+
+def curriculum_level_normalized(env: Any) -> torch.Tensor:
+    """返回每个 episode 的归一化等级，保持阶段 D 的一维观测形状。"""
+
+    state = get_runtime(env)
+    maximum = max(len(CURRICULUM_CFG.levels) - 1, 1)
+    return (state.episode_level.to(dtype=env.scene.env_origins.dtype) / maximum).unsqueeze(-1)
+
+
+def auxiliary_reward_scales(env: Any, component_name: str) -> torch.Tensor:
+    """按 episode 归属等级返回逐环境辅助奖励缩放。"""
+
+    if component_name in {"final_success", "safety_failure"}:
+        return torch.ones(env.num_envs, dtype=env.scene.env_origins.dtype, device=env.device)
+    if component_name not in CURRICULUM_CFG.levels[0].auxiliary_rewards.__dataclass_fields__:
+        raise ValueError(f"未知辅助奖励分量：{component_name}")
+    state = get_runtime(env)
+    values = torch.tensor(
+        [getattr(level.auxiliary_rewards, component_name) for level in CURRICULUM_CFG.levels],
+        dtype=env.scene.env_origins.dtype,
+        device=env.device,
+    )
+    return values[state.episode_level]
+
+
+def export_curriculum_state(env: Any) -> dict[str, object]:
+    return get_runtime(env).curriculum.snapshot()
+
+
+def restore_curriculum_state(env: Any, snapshot: dict[str, object]) -> None:
+    get_runtime(env).curriculum = CurriculumController.from_snapshot(CURRICULUM_CFG, snapshot)
+
+
+def _record_completed_episodes(env: Any, state: TcpDockingRuntimeState, env_ids: torch.Tensor) -> None:
+    """保存终局指标，并严格让安全失败覆盖同一步停车成功。"""
+
+    active_ids = env_ids[state.episode_active[env_ids]]
+    if active_ids.numel() == 0 or state.metrics is None:
+        return
+    metrics = state.metrics
+    safety = metrics.safety_failure[active_ids]
+    success = metrics.success[active_ids] & ~safety
+    state.completed_position_error_m[active_ids] = metrics.distance_m[active_ids]
+    state.completed_orientation_error_rad[active_ids] = metrics.orientation_error_rad[active_ids]
+    state.completed_tcp_speed_m_s[active_ids] = metrics.tcp_speed_m_s[active_ids]
+    state.completed_success[active_ids] = success
+    state.completed_safety_failure[active_ids] = safety
+    state.completed_timeout[active_ids] = env.episode_length_buf[active_ids] >= env.max_episode_length - 1
+    if getattr(env.cfg, "curriculum_enabled", True):
+        state.curriculum.submit_batch(
+            EpisodeResult(
+                level=int(state.episode_level[env_id].item()),
+                success=bool(success[index].item()),
+                safety_failure=bool(safety[index].item()),
+            )
+            for index, env_id in enumerate(active_ids)
+        )
 
 
 def compute_step(env: Any) -> tuple[StepMetrics, RewardComponents]:

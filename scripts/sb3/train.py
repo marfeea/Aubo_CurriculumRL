@@ -10,6 +10,7 @@
 
 import argparse
 import contextlib
+import json
 import re
 import signal
 import sys
@@ -41,7 +42,10 @@ parser.add_argument("--checkpoint", type=str, default=None, help="Continue the t
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument("--rollout-steps", type=int, default=None, help="Override PPO rollout length for smoke runs.")
 parser.add_argument("--run-tag", type=str, default="baseline", help="Stable label included in logs and checkpoints.")
-parser.add_argument("--curriculum-level", type=int, default=0, help="Curriculum level recorded in run metadata.")
+parser.add_argument("--curriculum-level", type=int, default=0, help="阶段 E 的初始课程等级。")
+parser.add_argument(
+    "--curriculum-state", type=Path, default=None, help="恢复训练时的课程状态 JSON；默认从 checkpoint 推导。"
+)
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument(
     "--keep_all_info",
@@ -96,7 +100,7 @@ from datetime import datetime
 import gymnasium as gym
 import numpy as np
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback, LogEveryNTimesteps
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, LogEveryNTimesteps
 from stable_baselines3.common.vec_env import VecNormalize
 
 from isaaclab.envs import (
@@ -119,16 +123,59 @@ logger = logging.getLogger(__name__)
 import CurriculumRL.tasks  # noqa: F401
 
 
+def _vecnormalize_path(checkpoint: Path) -> Path:
+    periodic_match = re.fullmatch(r"(.+_model)_(\d+_steps)", checkpoint.stem)
+    if periodic_match:
+        name = f"{periodic_match.group(1)}_vecnormalize_{periodic_match.group(2)}.pkl"
+    else:
+        name = f"{checkpoint.stem}_vecnormalize.pkl"
+    return checkpoint.with_name(name)
+
+
+def _curriculum_state_path(checkpoint: Path) -> Path:
+    return checkpoint.with_name(f"{checkpoint.stem}_curriculum.json")
+
+
+class CurriculumStateCheckpointCallback(BaseCallback):
+    """让课程窗口与每个 SB3 checkpoint 使用同一 timestep 命名。"""
+
+    def __init__(self, base_env: object, *, save_freq: int, save_path: str, name_prefix: str) -> None:
+        super().__init__()
+        self.base_env = base_env
+        self.save_freq = save_freq
+        self.save_path = Path(save_path)
+        self.name_prefix = name_prefix
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.save_freq == 0:
+            from CurriculumRL.tasks.tcp_docking.mdp.runtime_state import export_curriculum_state
+
+            output = self.save_path / f"{self.name_prefix}_{self.num_timesteps}_steps_curriculum.json"
+            output.write_text(
+                json.dumps(export_curriculum_state(self.base_env), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        return True
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     """Train with stable-baselines agent."""
-    if args_cli.curriculum_level != 0 and args_cli.task == "CurriculumRL-TcpDocking-v0":
-        raise ValueError("阶段 D 任务只允许 curriculum level 0；阶段 E 才启用等级切换")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", args_cli.run_tag):
         raise ValueError("--run-tag 只能包含字母、数字、点、下划线和连字符")
+    if args_cli.task == "CurriculumRL-TcpDocking-v0" and not 0 <= args_cli.curriculum_level <= 4:
+        raise ValueError("--curriculum-level 必须位于阶段 E 的 [0, 4] 范围")
     # randomly sample a seed if seed = -1
     if args_cli.seed == -1:
         args_cli.seed = random.randint(0, 10000)
+
+    curriculum_resume_path: Path | None = None
+    curriculum_resume_snapshot: dict[str, object] | None = None
+    if args_cli.task == "CurriculumRL-TcpDocking-v0" and args_cli.checkpoint is not None:
+        curriculum_resume_path = args_cli.curriculum_state or _curriculum_state_path(Path(args_cli.checkpoint))
+        if not curriculum_resume_path.is_file():
+            raise FileNotFoundError(f"恢复阶段 E 训练缺少课程状态：{curriculum_resume_path}")
+        curriculum_resume_snapshot = json.loads(curriculum_resume_path.read_text(encoding="utf-8"))
 
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
@@ -146,6 +193,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg["seed"]
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    if args_cli.task == "CurriculumRL-TcpDocking-v0":
+        env_cfg.curriculum_enabled = True
+        env_cfg.curriculum_initial_level = (
+            int(curriculum_resume_snapshot["level"])
+            if curriculum_resume_snapshot is not None
+            else args_cli.curriculum_level
+        )
 
     # directory for logging into
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -164,8 +218,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         {
             "task": args_cli.task,
             "curriculum_level": args_cli.curriculum_level,
+            "effective_curriculum_initial_level": env_cfg.curriculum_initial_level
+            if args_cli.task == "CurriculumRL-TcpDocking-v0"
+            else None,
             "seed": agent_cfg["seed"],
             "run_tag": args_cli.run_tag,
+            "curriculum_state": "params/curriculum.json",
             "env_config_snapshot": "params/env.yaml",
             "agent_config_snapshot": "params/agent.yaml",
         },
@@ -194,6 +252,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    base_env = env.unwrapped
 
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
@@ -237,6 +296,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # create agent from stable baselines
     agent = PPO(policy_arch, env, verbose=1, tensorboard_log=log_dir, **agent_cfg)
     if args_cli.checkpoint is not None:
+        checkpoint = Path(args_cli.checkpoint)
+        if args_cli.task == "CurriculumRL-TcpDocking-v0":
+            vecnormalize_path = _vecnormalize_path(checkpoint)
+            if not vecnormalize_path.is_file():
+                raise FileNotFoundError(f"恢复阶段 E 训练缺少 VecNormalize 状态：{vecnormalize_path}")
+            if not isinstance(env, VecNormalize):
+                raise RuntimeError("阶段 E 恢复训练要求启用 VecNormalize")
+            env = VecNormalize.load(vecnormalize_path, env)
+            env.training = True
+            from CurriculumRL.tasks.tcp_docking.mdp.runtime_state import restore_curriculum_state
+
+            assert curriculum_resume_snapshot is not None
+            restore_curriculum_state(base_env, curriculum_resume_snapshot)
         agent = agent.load(args_cli.checkpoint, env, print_system_info=True)
 
     # callbacks for agent
@@ -250,6 +322,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         verbose=2,
     )
     callbacks = [checkpoint_callback, LogEveryNTimesteps(n_steps=args_cli.log_interval)]
+    if args_cli.task == "CurriculumRL-TcpDocking-v0":
+        callbacks.append(
+            CurriculumStateCheckpointCallback(
+                base_env, save_freq=1000, save_path=log_dir, name_prefix=checkpoint_prefix
+            )
+        )
 
     # train the agent
     with contextlib.suppress(KeyboardInterrupt):
@@ -267,6 +345,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if isinstance(env, VecNormalize):
         print("Saving normalization")
         env.save(os.path.join(log_dir, f"{checkpoint_prefix}_vecnormalize.pkl"))
+    if args_cli.task == "CurriculumRL-TcpDocking-v0":
+        from CurriculumRL.tasks.tcp_docking.mdp.runtime_state import export_curriculum_state
+
+        curriculum_snapshot = export_curriculum_state(base_env)
+        snapshot_path = Path(log_dir) / f"{checkpoint_prefix}_curriculum.json"
+        snapshot_path.write_text(json.dumps(curriculum_snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        (Path(log_dir) / "params" / "curriculum.json").write_text(
+            json.dumps(curriculum_snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
 
     print(f"Training time: {round(time.time() - start_time, 2)} seconds")
 

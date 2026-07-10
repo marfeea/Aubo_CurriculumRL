@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from ....configs.assets import ROBOT_PRIM_CONTRACT, SCENE_ENTITY_AUBO
-from .runtime_state import compute_step, get_runtime
+from .runtime_state import compute_step, curriculum_level_normalized, get_runtime
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -43,4 +43,4 @@ def target_state_one_hot(env: ManagerBasedRLEnv) -> torch.Tensor:
 
 
 def curriculum_level(env: ManagerBasedRLEnv) -> torch.Tensor:
-    return torch.zeros((env.num_envs, 1), dtype=env.scene.env_origins.dtype, device=env.device)
+    return curriculum_level_normalized(env)
