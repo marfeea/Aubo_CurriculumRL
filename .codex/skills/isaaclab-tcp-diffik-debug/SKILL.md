@@ -11,6 +11,7 @@ description: 诊断 CurriculumRL 中 AUBO 带夹爪 TCP 停靠的 Isaac Lab 场�
 
 ## 建立诊断基线
 
+0. 在当前工作站优先使用已验证的 Isaac Lab 解释器 `D:\Anaconda\envs\isaaclab\python.exe` 直接运行仓库脚本，例如 `D:\Anaconda\envs\isaaclab\python.exe scripts/list_envs.py`。先核验该文件存在且 `import isaaclab` 成功；若失效，报告环境故障，不静默切换到普通 Python 或仅含 Isaac Sim 的启动器。
 1. 读取 `docs/DifferentialIK课程RL_TCP停靠方案与项目迁移说明.md` 中与故障相关的契约。
 2. 运行 `git status --short`，检查目标文件 diff，并用 `rg --files source scripts docs` 确认当前实现位置。
 3. 记录复现命令、Isaac Sim/Isaac Lab/Python 版本、设备、环境数、随机种子、`sim.dt`、decimation、任务名和课程等级。
