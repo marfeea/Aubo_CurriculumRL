@@ -28,6 +28,34 @@ def illegal_contact(
     return torch.any(force_magnitudes > force_threshold_n, dim=-1)
 
 
+def illegal_filtered_contact(
+    filtered_contact_forces_w: torch.Tensor | None,
+    body_names: tuple[str, ...],
+    ignored_body_names: tuple[str, ...],
+    force_threshold_n: float,
+) -> torch.Tensor:
+    """按配置档过滤后的 ``(env, body, filter, xyz)`` 接触判定。"""
+
+    if filtered_contact_forces_w is None:
+        raise RuntimeError("已启用的碰撞配置档未产生 force_matrix_w")
+    if (
+        filtered_contact_forces_w.ndim != 4
+        or filtered_contact_forces_w.shape[1] != len(body_names)
+        or filtered_contact_forces_w.shape[-1] != 3
+    ):
+        raise ValueError(
+            "filtered_contact_forces_w 必须为 (env, body, filter, 3)，"
+            f"实际 {tuple(filtered_contact_forces_w.shape)}，body={body_names}"
+        )
+    included = torch.tensor(
+        [name not in ignored_body_names for name in body_names],
+        dtype=torch.bool,
+        device=filtered_contact_forces_w.device,
+    )
+    force_magnitudes = torch.linalg.vector_norm(filtered_contact_forces_w[:, included], dim=-1)
+    return torch.any(force_magnitudes > force_threshold_n, dim=(1, 2))
+
+
 def target_disturbed(
     target_position_w: torch.Tensor,
     target_baseline_position_w: torch.Tensor,

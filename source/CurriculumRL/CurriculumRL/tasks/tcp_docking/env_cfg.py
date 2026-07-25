@@ -16,6 +16,8 @@ from ...configs.rewards import (
     FIRST_ENTRY_WEIGHT,
     INNER_DOCKING_QUALITY_WEIGHT,
     LOW_SPEED_PARKING_WEIGHT,
+    PATH_REFERENCE_PROGRESS_WEIGHT,
+    PATH_REFERENCE_REACHED_WEIGHT,
     PROXIMITY_WEIGHT,
     SAFETY_FAILURE_WEIGHT,
     TOOL_AXIS_PROGRESS_WEIGHT,
@@ -42,6 +44,12 @@ class ObservationsCfg:
         tcp_velocity = ObsTerm(func=mdp.tcp_velocity)
         target_state = ObsTerm(func=mdp.target_state_one_hot)
         curriculum_level = ObsTerm(func=mdp.curriculum_level)
+        path_mode = ObsTerm(func=mdp.path_mode)
+        collision_profile = ObsTerm(func=mdp.collision_profile)
+        collision_clearance = ObsTerm(func=mdp.collision_clearance)
+        collision_clearance_mask = ObsTerm(func=mdp.collision_clearance_mask)
+        action_mask = ObsTerm(func=mdp.action_mask)
+        curriculum_stage = ObsTerm(func=mdp.curriculum_stage)
 
         def __post_init__(self) -> None:
             self.enable_corruption = False
@@ -69,6 +77,8 @@ class RewardsCfg:
     low_speed_parking = RewTerm(func=mdp.low_speed_parking, weight=LOW_SPEED_PARKING_WEIGHT)
     first_entry = RewTerm(func=mdp.first_entry, weight=FIRST_ENTRY_WEIGHT)
     tool_axis_progress = RewTerm(func=mdp.tool_axis_progress, weight=TOOL_AXIS_PROGRESS_WEIGHT)
+    path_reference_progress = RewTerm(func=mdp.path_reference_progress, weight=PATH_REFERENCE_PROGRESS_WEIGHT)
+    path_reference_reached = RewTerm(func=mdp.path_reference_reached, weight=PATH_REFERENCE_REACHED_WEIGHT)
     final_success = RewTerm(func=mdp.final_success, weight=FINAL_SUCCESS_WEIGHT)
     safety_failure = RewTerm(func=mdp.safety_failure, weight=SAFETY_FAILURE_WEIGHT)
 
@@ -94,6 +104,8 @@ class TcpDockingEnvCfg(ManagerBasedRLEnvCfg):
     curriculum_initial_level: int = 0
     evaluation_target_state_index: int | None = None
     evaluation_curriculum_level: int = 4
+    evaluation_path_mode_index: int | None = None
+    trajectory_recording_enabled: bool = False
 
     def __post_init__(self) -> None:
         self.decimation = POLICY_DECIMATION

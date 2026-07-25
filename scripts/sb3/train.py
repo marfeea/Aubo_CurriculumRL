@@ -31,6 +31,12 @@ parser = argparse.ArgumentParser(description="Train an RL agent with Stable-Base
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument("--video_interval", type=int, default=2000, help="Interval between video recordings (in steps).")
+parser.add_argument(
+    "--render-interval",
+    type=int,
+    default=None,
+    help="可选：每隔多少物理步刷新一次渲染；仅影响渲染，不改变物理或策略控制频率。",
+)
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
@@ -165,6 +171,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         raise ValueError("--run-tag 只能包含字母、数字、点、下划线和连字符")
     if args_cli.task == "CurriculumRL-TcpDocking-v0" and not 0 <= args_cli.curriculum_level <= 4:
         raise ValueError("--curriculum-level 必须位于阶段 E 的 [0, 4] 范围")
+    if args_cli.render_interval is not None and args_cli.render_interval <= 0:
+        raise ValueError("--render-interval 必须为正整数")
     # randomly sample a seed if seed = -1
     if args_cli.seed == -1:
         args_cli.seed = random.randint(0, 10000)
@@ -193,6 +201,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg["seed"]
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    if args_cli.render_interval is not None:
+        env_cfg.sim.render_interval = args_cli.render_interval
     if args_cli.task == "CurriculumRL-TcpDocking-v0":
         env_cfg.curriculum_enabled = True
         env_cfg.curriculum_initial_level = (

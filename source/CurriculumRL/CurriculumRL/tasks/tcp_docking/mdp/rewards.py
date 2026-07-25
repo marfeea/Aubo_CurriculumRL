@@ -45,6 +45,14 @@ def tool_axis_progress(env: ManagerBasedRLEnv) -> torch.Tensor:
     return _component(env, "tool_axis_progress")
 
 
+def path_reference_progress(env: ManagerBasedRLEnv) -> torch.Tensor:
+    return _component(env, "path_reference_progress")
+
+
+def path_reference_reached(env: ManagerBasedRLEnv) -> torch.Tensor:
+    return _component(env, "path_reference_reached")
+
+
 def final_success(env: ManagerBasedRLEnv) -> torch.Tensor:
     return _component(env, "final_success")
 

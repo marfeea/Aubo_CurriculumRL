@@ -7,7 +7,17 @@ from typing import TYPE_CHECKING
 import torch
 
 from ....configs.assets import ROBOT_PRIM_CONTRACT, SCENE_ENTITY_AUBO
-from .runtime_state import compute_step, curriculum_level_normalized, get_runtime
+from .runtime_state import (
+    collision_clearance_enabled_mask,
+    collision_group_min_clearance,
+    collision_profile_one_hot,
+    compute_step,
+    curriculum_level_normalized,
+    curriculum_stage_one_hot,
+    get_runtime,
+    path_mode_one_hot,
+    tcp_action_mask,
+)
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -44,3 +54,27 @@ def target_state_one_hot(env: ManagerBasedRLEnv) -> torch.Tensor:
 
 def curriculum_level(env: ManagerBasedRLEnv) -> torch.Tensor:
     return curriculum_level_normalized(env)
+
+
+def path_mode(env: ManagerBasedRLEnv) -> torch.Tensor:
+    return path_mode_one_hot(env)
+
+
+def collision_profile(env: ManagerBasedRLEnv) -> torch.Tensor:
+    return collision_profile_one_hot(env)
+
+
+def collision_clearance(env: ManagerBasedRLEnv) -> torch.Tensor:
+    return collision_group_min_clearance(env)
+
+
+def collision_clearance_mask(env: ManagerBasedRLEnv) -> torch.Tensor:
+    return collision_clearance_enabled_mask(env)
+
+
+def action_mask(env: ManagerBasedRLEnv) -> torch.Tensor:
+    return tcp_action_mask(env)
+
+
+def curriculum_stage(env: ManagerBasedRLEnv) -> torch.Tensor:
+    return curriculum_stage_one_hot(env)

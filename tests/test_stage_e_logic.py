@@ -11,6 +11,17 @@ from CurriculumRL.configs.curriculum import CURRICULUM_CFG, CurriculumTransition
 from CurriculumRL.logic.curriculum_state import CurriculumController, EpisodeResult  # noqa: E402
 
 
+def episode(level: int, curriculum_success: bool, safety_failure: bool = False) -> EpisodeResult:
+    return EpisodeResult(
+        level=level,
+        curriculum_success=curriculum_success,
+        formal_parking_success=curriculum_success,
+        safety_failure=safety_failure,
+        target_state_index=0,
+        path_mode_index=0,
+        collision_profile_id="C1",
+    )
+
 def test_safety_failure_overrides_success_and_promotes_only_after_complete_batch() -> None:
     config = replace(
         CURRICULUM_CFG,
@@ -27,13 +38,13 @@ def test_safety_failure_overrides_success_and_promotes_only_after_complete_batch
     controller = CurriculumController(config)
     controller.submit_batch(
         (
-            EpisodeResult(level=0, success=True, safety_failure=False),
-            EpisodeResult(level=0, success=True, safety_failure=False),
-            EpisodeResult(level=0, success=True, safety_failure=True),
+            episode(0, True),
+            episode(0, True),
+            episode(0, True, safety_failure=True),
         )
     )
     assert controller.level == 0
-    transition = controller.submit_batch((EpisodeResult(level=0, success=True, safety_failure=False),))
+    transition = controller.submit_batch((episode(0, True),))
     assert transition is None
     assert controller.windows[0][2].success is False
     assert controller.windows[0][2].safety_failure is True
@@ -55,12 +66,12 @@ def test_old_level_episode_does_not_pollute_new_level_window_after_promotion() -
     controller = CurriculumController(config)
     transition = controller.submit_batch(
         (
-            EpisodeResult(level=0, success=True, safety_failure=False),
-            EpisodeResult(level=0, success=True, safety_failure=False),
+            episode(0, True),
+            episode(0, True),
         )
     )
     assert transition is not None and transition.new_level == 1
-    controller.submit_batch((EpisodeResult(level=0, success=False, safety_failure=True),))
+    controller.submit_batch((episode(0, False, safety_failure=True),))
     assert controller.level == 1
     assert len(controller.windows[0]) == 2
     assert len(controller.windows.get(1, ())) == 0
@@ -68,7 +79,7 @@ def test_old_level_episode_does_not_pollute_new_level_window_after_promotion() -
 
 def test_snapshot_restores_fixed_windows_and_rejects_wrong_version() -> None:
     controller = CurriculumController(CURRICULUM_CFG)
-    controller.submit_batch((EpisodeResult(level=0, success=True, safety_failure=False),))
+    controller.submit_batch((episode(0, True),))
     snapshot = controller.snapshot()
     restored = CurriculumController.from_snapshot(CURRICULUM_CFG, snapshot)
     assert restored.snapshot() == snapshot

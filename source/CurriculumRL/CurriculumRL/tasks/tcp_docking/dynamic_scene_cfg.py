@@ -6,8 +6,21 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 
 from ...configs.assets import ROBOT_CONTACT_PRIM_EXPR, asset_by_key, asset_path
+from ...configs.curriculum import CURRICULUM_COLLISION_PROFILES
 from ...configs.task import TARGET_STATES
 from .static_scene_cfg import TcpDockingStaticSceneCfg
+
+
+def _c1_contact_sensor_cfg(body_name: str) -> ContactSensorCfg:
+    """ContactSensor 仅支持一个传感刚体对多个过滤体，故 C1 按刚体拆分。"""
+
+    return ContactSensorCfg(
+        prim_path=f"{{ENV_REGEX_NS}}/AUBObot/AUBO_E5/{body_name}",
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(CURRICULUM_COLLISION_PROFILES[0].filter_prim_paths_expr),
+    )
 
 
 @configclass
@@ -34,3 +47,11 @@ class TcpDockingDynamicSceneCfg(TcpDockingStaticSceneCfg):
         history_length=1,
         debug_vis=False,
     )
+    # P3 的阶段 1 C1 仅将机器人与玻璃防护结构的接触作为非法接触。
+    robot_contact_c1_base_link = _c1_contact_sensor_cfg("Base_Link")
+    robot_contact_c1_link_01 = _c1_contact_sensor_cfg("Link_01")
+    robot_contact_c1_link_02 = _c1_contact_sensor_cfg("Link_02")
+    robot_contact_c1_link_03 = _c1_contact_sensor_cfg("Link_03")
+    robot_contact_c1_link_04 = _c1_contact_sensor_cfg("Link_04")
+    robot_contact_c1_link_05 = _c1_contact_sensor_cfg("Link_05")
+    robot_contact_c1_flange = _c1_contact_sensor_cfg("Flange")

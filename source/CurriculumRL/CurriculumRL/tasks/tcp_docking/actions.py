@@ -141,15 +141,19 @@ class DifferentialIKAction:
         self.target_tcp_position_b[env_ids] = position_b[env_ids]
         self.target_tcp_quaternion_b[env_ids] = quaternion_b[env_ids]
 
-    def process_actions(self, raw_action: torch.Tensor) -> None:
+    def process_actions(self, raw_action: torch.Tensor, *, action_mask: torch.Tensor | None = None) -> None:
         """每个策略步调用一次，基于当前 TCP 生成并缓存六维增量目标。"""
 
         if raw_action.shape != self.raw_action.shape:
             raise ValueError(f"动作形状必须为 {tuple(self.raw_action.shape)}，实际 {tuple(raw_action.shape)}")
+        if action_mask is None:
+            action_mask = torch.ones_like(raw_action)
+        if action_mask.shape != raw_action.shape:
+            raise ValueError(f"动作掩码形状必须为 {tuple(raw_action.shape)}，实际 {tuple(action_mask.shape)}")
         self.raw_action.copy_(raw_action)
         self.processed_action.copy_(
             scale_policy_action(
-                raw_action,
+                raw_action * action_mask,
                 action_clip=ACTION_CLIP,
                 position_scale_m=POSITION_INCREMENT_SCALE_M,
                 rotation_scale_rad=ROTATION_INCREMENT_SCALE_RAD,
@@ -254,7 +258,10 @@ class DifferentialIKActionTerm(ActionTerm):
         return self.controller.processed_action
 
     def process_actions(self, actions: torch.Tensor) -> None:
-        self.controller.process_actions(actions)
+        # 延迟导入避免 runtime_state 在 compute_step 中反向导入动作项。
+        from .mdp.runtime_state import tcp_action_mask
+
+        self.controller.process_actions(actions, action_mask=tcp_action_mask(self._env))
 
     def apply_actions(self) -> None:
         self.controller.apply_actions()

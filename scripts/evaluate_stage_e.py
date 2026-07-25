@@ -1,13 +1,14 @@
-"""阶段 E 正式评估：冻结策略、关闭课程，并逐目标状态统计最终任务指标。"""
+"""阶段 E 正式评估调度器：每个固定评估单元由独立子进程执行。"""
 # ruff: noqa: I001
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
-from collections import defaultdict
+import subprocess
+import sys
 from pathlib import Path
+from typing import Mapping
 
 from _bootstrap import add_package_source
 
@@ -15,13 +16,28 @@ add_package_source()
 
 from isaaclab.app import AppLauncher  # noqa: E402
 
+from CurriculumRL.configs.curriculum import CURRICULUM_CONFIG_VERSION  # noqa: E402
+from CurriculumRL.configs.task import TARGET_STATES  # noqa: E402
+from CurriculumRL.logic.stage_e_evaluation import (  # noqa: E402
+    EvaluationUnit,
+    aggregate_unit_results,
+    curriculum_state_path,
+    evaluation_units,
+    unit_result_filename,
+    validate_curriculum_snapshot,
+    validate_unit_result,
+    vecnormalize_path,
+)
+
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--checkpoint", type=Path, required=True, help="阶段 E PPO checkpoint 路径。")
 parser.add_argument("--num-envs", type=int, default=4, help="并行环境数；必须整除每状态 episode 数。")
 parser.add_argument("--episodes-per-state", type=int, default=32, help="每个目标状态、每个随机种子的完整 episode 数。")
 parser.add_argument("--seeds", type=int, nargs="+", default=(7, 11, 19), help="固定评估随机种子列表。")
-parser.add_argument("--json-output", type=Path, default=None, help="可选 UTF-8 JSON 结果路径。")
+parser.add_argument("--json-output", type=Path, default=None, help="可选 UTF-8 汇总 JSON 结果路径。")
+parser.add_argument("--unit-output-dir", type=Path, default=None, help="评估单元 JSON 目录；默认位于汇总或 checkpoint 旁。")
+parser.add_argument("--rerun-all", action="store_true", help="忽略已有的有效单元结果并全部重跑。")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -32,150 +48,123 @@ if args_cli.num_envs <= 0 or args_cli.episodes_per_state <= 0 or args_cli.episod
 if not args_cli.seeds:
     parser.error("至少提供一个 --seeds 随机种子。")
 
-app_launcher = AppLauncher(args_cli)
-simulation_app = app_launcher.app
 
-import CurriculumRL.tasks  # noqa: E402, F401
-import gymnasium as gym  # noqa: E402
-import numpy as np  # noqa: E402
-from stable_baselines3 import PPO  # noqa: E402
-from stable_baselines3.common.vec_env import VecNormalize  # noqa: E402
-
-from CurriculumRL.configs.curriculum import CURRICULUM_CONFIG_VERSION  # noqa: E402
-from CurriculumRL.configs.task import TARGET_STATES  # noqa: E402
-from CurriculumRL.tasks.tcp_docking.mdp.runtime_state import get_runtime  # noqa: E402
-from isaaclab_rl.sb3 import Sb3VecEnvWrapper  # noqa: E402
-from isaaclab_tasks.utils.parse_cfg import parse_env_cfg  # noqa: E402
+def _unit_output_dir() -> Path:
+    if args_cli.unit_output_dir is not None:
+        return args_cli.unit_output_dir
+    if args_cli.json_output is not None:
+        return args_cli.json_output.parent / f"{args_cli.json_output.stem}_units"
+    return args_cli.checkpoint.parent / f"{args_cli.checkpoint.stem}_stage_e_units"
 
 
-def _vecnormalize_path(checkpoint: Path) -> Path:
-    periodic_match = re.fullmatch(r"(.+_model)_(\d+_steps)", checkpoint.stem)
-    if periodic_match:
-        name = f"{periodic_match.group(1)}_vecnormalize_{periodic_match.group(2)}.pkl"
-    else:
-        name = f"{checkpoint.stem}_vecnormalize.pkl"
-    return checkpoint.with_name(name)
+def _load_reusable_unit(unit: EvaluationUnit, output_path: Path) -> Mapping[str, object] | None:
+    if args_cli.rerun_all or not output_path.is_file():
+        return None
+    try:
+        report = json.loads(output_path.read_text(encoding="utf-8"))
+        if not isinstance(report, dict):
+            raise ValueError("JSON 根节点不是对象")
+        validate_unit_result(
+            report,
+            unit,
+            config_version=CURRICULUM_CONFIG_VERSION,
+            episodes_per_state=args_cli.episodes_per_state,
+            target_name=TARGET_STATES[unit.target_state_index].name,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"STAGE_E_RETRY_UNIT=seed={unit.seed},target={unit.target_state_index},reason={error}", flush=True)
+        return None
+    print(f"STAGE_E_REUSE_UNIT=seed={unit.seed},target={unit.target_state_index},path={output_path}", flush=True)
+    return report
 
 
-def _curriculum_state_path(checkpoint: Path) -> Path:
-    return checkpoint.with_name(f"{checkpoint.stem}_curriculum.json")
+def _worker_command(unit: EvaluationUnit, output_path: Path) -> list[str]:
+    command = [
+        sys.executable,
+        str(Path(__file__).with_name("evaluate_stage_e_worker.py")),
+        "--checkpoint",
+        str(args_cli.checkpoint),
+        "--num-envs",
+        str(args_cli.num_envs),
+        "--episodes-per-state",
+        str(args_cli.episodes_per_state),
+        "--seed",
+        str(unit.seed),
+        "--target-state-index",
+        str(unit.target_state_index),
+        "--json-output",
+        str(output_path),
+        "--device",
+        str(args_cli.device),
+    ]
+    if args_cli.headless:
+        command.append("--headless")
+    return command
 
 
-def _termination_counts(base: object, done: np.ndarray, counts: dict[str, int]) -> None:
-    mask = np.asarray(done, dtype=bool)
-    if not mask.any():
-        return
-    manager = base.termination_manager
-    last_dones = manager._last_episode_dones.detach().cpu().numpy()  # noqa: SLF001 - 无公开等价统计接口。
-    for index, name in enumerate(manager.active_terms):
-        counts[name] += int(last_dones[mask, index].sum())
-
-
-def _mean_or_none(values: list[float]) -> float | None:
-    return float(np.mean(values)) if values else None
-
-
-def _evaluate_target(seed: int, target_index: int, vecnormalize_path: Path) -> dict[str, object]:
-    env_cfg = parse_env_cfg("CurriculumRL-TcpDocking-v0", device=args_cli.device, num_envs=args_cli.num_envs)
-    env_cfg.seed = seed
-    env_cfg.curriculum_enabled = False
-    env_cfg.evaluation_target_state_index = target_index
-    env_cfg.evaluation_curriculum_level = 4
-    raw_env = gym.make("CurriculumRL-TcpDocking-v0", cfg=env_cfg)
-    base = raw_env.unwrapped
-    env = VecNormalize.load(vecnormalize_path, Sb3VecEnvWrapper(raw_env))
-    env.training = False
-    env.norm_reward = False
-    agent = PPO.load(args_cli.checkpoint, env, print_system_info=False)
-    observation = env.reset()
-    returns = np.zeros(args_cli.num_envs, dtype=np.float64)
-    lengths = np.zeros(args_cli.num_envs, dtype=np.int64)
-    completed: list[dict[str, object]] = []
-    causes: dict[str, int] = defaultdict(int)
-    while len(completed) < args_cli.episodes_per_state:
-        action, _ = agent.predict(observation, deterministic=True)
-        observation, reward, done, _ = env.step(action)
-        reward = np.asarray(reward, dtype=np.float64)
-        done = np.asarray(done, dtype=bool)
-        if not (np.isfinite(reward).all() and np.isfinite(np.asarray(observation)).all()):
-            raise RuntimeError("正式评估期间观测或奖励出现 NaN/Inf")
-        returns += reward
-        lengths += 1
-        _termination_counts(base, done, causes)
-        runtime = get_runtime(base)
-        for env_index in np.flatnonzero(done):
-            if len(completed) >= args_cli.episodes_per_state:
-                break
-            position_error_m = float(runtime.completed_position_error_m[env_index].item())
-            orientation_error_rad = float(runtime.completed_orientation_error_rad[env_index].item())
-            tcp_speed_m_s = float(runtime.completed_tcp_speed_m_s[env_index].item())
-            if not np.isfinite((position_error_m, orientation_error_rad, tcp_speed_m_s)).all():
-                raise RuntimeError("未捕获终局指标；请检查课程 reset 与 SB3 auto-reset 的时序")
-            completed.append(
+def _run_unit(unit: EvaluationUnit, output_path: Path) -> Mapping[str, object]:
+    print(f"STAGE_E_START_UNIT=seed={unit.seed},target={unit.target_state_index}", flush=True)
+    completed = subprocess.run(_worker_command(unit, output_path), check=False)
+    if completed.returncode:
+        failure_path = output_path.with_suffix(".failure.json")
+        failure_path.write_text(
+            json.dumps(
                 {
-                    "return": float(returns[env_index]),
-                    "length": int(lengths[env_index]),
-                    "position_error_m": position_error_m,
-                    "orientation_error_rad": orientation_error_rad,
-                    "tcp_speed_m_s": tcp_speed_m_s,
-                    "success": bool(runtime.completed_success[env_index].item()),
-                    "safety_failure": bool(runtime.completed_safety_failure[env_index].item()),
-                    "timeout": bool(runtime.completed_timeout[env_index].item()),
-                }
+                    "seed": unit.seed,
+                    "target_state_index": unit.target_state_index,
+                    "returncode": completed.returncode,
+                    "command": _worker_command(unit, output_path),
+                },
+                ensure_ascii=False,
+                indent=2,
             )
-        returns[done] = 0.0
-        lengths[done] = 0
-    env.close()
-    successes = [item for item in completed if item["success"]]
-    return {
-        "seed": seed,
-        "target_state": TARGET_STATES[target_index].name,
-        "target_state_index": target_index,
-        "episodes": len(completed),
-        "success_rate": float(np.mean([item["success"] for item in completed])),
-        "mean_final_position_error_m": _mean_or_none([item["position_error_m"] for item in completed]),
-        "mean_final_orientation_error_rad": _mean_or_none([item["orientation_error_rad"] for item in completed]),
-        "mean_tcp_speed_on_success_m_s": _mean_or_none([item["tcp_speed_m_s"] for item in successes]),
-        "illegal_collision_rate": causes["illegal_contact"] / len(completed),
-        "target_disturbance_rate": causes["target_disturbed"] / len(completed),
-        "safety_failure_rate": float(np.mean([item["safety_failure"] for item in completed])),
-        "timeout_rate": float(np.mean([item["timeout"] for item in completed])),
-        "mean_completion_time_s": float(np.mean([item["length"] for item in completed]) * base.step_dt),
-        "termination_counts": dict(causes),
-    }
+            + "\n",
+            encoding="utf-8",
+        )
+        raise RuntimeError(
+            f"评估单元失败：seed={unit.seed}, target_state_index={unit.target_state_index}, "
+            f"退出码={completed.returncode}；保留的失败证据：{failure_path}"
+        )
+    report = json.loads(output_path.read_text(encoding="utf-8"))
+    if not isinstance(report, dict):
+        raise ValueError(f"评估子进程输出不是 JSON 对象：{output_path}")
+    validate_unit_result(
+        report,
+        unit,
+        config_version=CURRICULUM_CONFIG_VERSION,
+        episodes_per_state=args_cli.episodes_per_state,
+        target_name=TARGET_STATES[unit.target_state_index].name,
+    )
+    return report
 
 
 def main() -> dict[str, object]:
-    vecnormalize_path = _vecnormalize_path(args_cli.checkpoint)
-    curriculum_state_path = _curriculum_state_path(args_cli.checkpoint)
-    if not vecnormalize_path.is_file():
-        raise FileNotFoundError(f"正式评估缺少冻结的 VecNormalize 状态：{vecnormalize_path}")
-    if not curriculum_state_path.is_file():
-        raise FileNotFoundError(f"正式评估缺少与 checkpoint 关联的课程状态：{curriculum_state_path}")
-    curriculum_snapshot = json.loads(curriculum_state_path.read_text(encoding="utf-8"))
-    if curriculum_snapshot.get("config_version") != CURRICULUM_CONFIG_VERSION:
-        raise ValueError("checkpoint 的课程状态版本与当前正式评估配置不一致")
-    results = [
-        _evaluate_target(seed, target_index, vecnormalize_path)
-        for target_index in range(len(TARGET_STATES))
-        for seed in args_cli.seeds
-    ]
-    by_target: dict[str, list[dict[str, object]]] = defaultdict(list)
-    for item in results:
-        by_target[str(item["target_state"])].append(item)
-    summary: dict[str, object] = {
-        "task": "CurriculumRL-TcpDocking-v0",
-        "checkpoint": str(args_cli.checkpoint.resolve()),
-        "vecnormalize": str(vecnormalize_path.resolve()),
-        "curriculum_state": str(curriculum_state_path.resolve()),
-        "curriculum_config_version": CURRICULUM_CONFIG_VERSION,
-        "curriculum_disabled": True,
-        "evaluation_observation_curriculum_level": 4,
-        "evaluation_target_distribution": "per-target fixed",
-        "seeds": list(args_cli.seeds),
-        "episodes_per_state_per_seed": args_cli.episodes_per_state,
-        "results_by_target": dict(by_target),
-    }
+    vecnormalize = vecnormalize_path(args_cli.checkpoint)
+    curriculum_state = curriculum_state_path(args_cli.checkpoint)
+    if not vecnormalize.is_file():
+        raise FileNotFoundError(f"正式评估缺少冻结的 VecNormalize 状态：{vecnormalize}")
+    if not curriculum_state.is_file():
+        raise FileNotFoundError(f"正式评估缺少与 checkpoint 关联的课程状态：{curriculum_state}")
+    validate_curriculum_snapshot(json.loads(curriculum_state.read_text(encoding="utf-8")), CURRICULUM_CONFIG_VERSION)
+
+    unit_directory = _unit_output_dir()
+    unit_directory.mkdir(parents=True, exist_ok=True)
+    reports: list[Mapping[str, object]] = []
+    for unit in evaluation_units(args_cli.seeds, len(TARGET_STATES)):
+        output_path = unit_directory / unit_result_filename(unit)
+        report = _load_reusable_unit(unit, output_path)
+        if report is None:
+            report = _run_unit(unit, output_path)
+        reports.append(report)
+    summary = aggregate_unit_results(
+        reports,
+        checkpoint=args_cli.checkpoint,
+        vecnormalize=vecnormalize,
+        curriculum_state=curriculum_state,
+        config_version=CURRICULUM_CONFIG_VERSION,
+        seeds=args_cli.seeds,
+        episodes_per_state=args_cli.episodes_per_state,
+    )
     print("STAGE_E_EVALUATION=" + json.dumps(summary, ensure_ascii=False, sort_keys=True), flush=True)
     if args_cli.json_output is not None:
         args_cli.json_output.parent.mkdir(parents=True, exist_ok=True)
@@ -184,7 +173,4 @@ def main() -> dict[str, object]:
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    finally:
-        simulation_app.close()
+    main()

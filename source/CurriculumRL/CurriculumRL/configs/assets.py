@@ -33,6 +33,7 @@ class RobotPrimContract:
     arm_joints: tuple[str, ...]
     gripper_joints: tuple[str, ...]
     ignored_contact_bodies: tuple[str, ...]
+    contact_bodies: tuple[str, ...]
 
 
 ASSETS: Final = (
@@ -49,6 +50,7 @@ ROBOT_PRIM_CONTRACT: Final = RobotPrimContract(
     arm_joints=("Joint1", "Joint2", "Joint3", "Joint4", "Joint5", "Flange"),
     gripper_joints=("UpperFinger", "DownFinger"),
     ignored_contact_bodies=("Base_Link",),
+    contact_bodies=("Base_Link", "Link_01", "Link_02", "Link_03", "Link_04", "Link_05", "Flange"),
 )
 
 SCENE_ENTITY_AUBO: Final = "AUBObot"

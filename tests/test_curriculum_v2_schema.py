@@ -16,7 +16,7 @@ from CurriculumRL.configs.curriculum import (  # noqa: E402
 
 
 def test_curriculum_v2_schema_is_versioned_and_has_fixed_shape() -> None:
-    assert CURRICULUM_V2_SCHEMA_VERSION == "curriculum-v2-p0"
+    assert CURRICULUM_V2_SCHEMA_VERSION == "curriculum-v2-p3"
     assert CURRICULUM_V2_OBSERVATION_DIMENSION == 52
     assert len({field.name for field in CURRICULUM_V2_OBSERVATION_SCHEMA}) == len(CURRICULUM_V2_OBSERVATION_SCHEMA)
     assert all(field.dimension > 0 for field in CURRICULUM_V2_OBSERVATION_SCHEMA)

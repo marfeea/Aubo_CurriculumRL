@@ -24,6 +24,8 @@ class RewardComponents:
     low_speed_parking: torch.Tensor
     first_entry: torch.Tensor
     tool_axis_progress: torch.Tensor
+    path_reference_progress: torch.Tensor
+    path_reference_reached: torch.Tensor
     final_success: torch.Tensor
     safety_failure: torch.Tensor
 
@@ -57,6 +59,8 @@ def update_reward_state(
     proximity_length_scale_m: float,
     orientation_quality_scale_rad: float,
     speed_quality_scale_m_s: float,
+    path_reference_progress_m: torch.Tensor | None = None,
+    path_reference_reached_now: torch.Tensor | None = None,
     update_mask: torch.Tensor | None = None,
 ) -> RewardComponents:
     """计算一次策略步奖励分量并提交历史；首次样本不产生伪进展。"""
@@ -65,6 +69,12 @@ def update_reward_state(
         raise ValueError("奖励质量尺度必须为正数")
     if update_mask is None:
         update_mask = torch.ones_like(distance_m, dtype=torch.bool)
+    if path_reference_progress_m is None:
+        path_reference_progress_m = torch.zeros_like(distance_m)
+    if path_reference_reached_now is None:
+        path_reference_reached_now = torch.zeros_like(distance_m, dtype=torch.bool)
+    if path_reference_progress_m.shape != distance_m.shape or path_reference_reached_now.shape != distance_m.shape:
+        raise ValueError("路径奖励输入必须与距离张量形状一致")
     previous_valid = torch.isfinite(state.previous_distance_m) & update_mask
     best_valid = torch.isfinite(state.best_distance_m)
     axis_valid = torch.isfinite(state.previous_axis_alignment) & update_mask
@@ -89,6 +99,8 @@ def update_reward_state(
         low_speed_parking=parking_inside * update_mask * speed_quality,
         first_entry=first_entry.to(distance_m.dtype),
         tool_axis_progress=tool_axis_progress,
+        path_reference_progress=path_reference_progress_m * update_mask,
+        path_reference_reached=(path_reference_reached_now & update_mask).to(distance_m.dtype),
         final_success=(success & update_mask).to(distance_m.dtype),
         safety_failure=(safety_failure & update_mask).to(distance_m.dtype),
     )

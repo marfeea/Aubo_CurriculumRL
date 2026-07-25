@@ -6,7 +6,7 @@ from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from ..configs.curriculum import CurriculumCfg
+from ..configs.curriculum import CURRICULUM_COLLISION_PROFILES, CurriculumCfg
 
 
 @dataclass(frozen=True)
@@ -60,8 +60,18 @@ class EpisodeResult:
     """一个完整 episode 的归属等级和最终结果。"""
 
     level: int
-    success: bool
+    curriculum_success: bool
+    formal_parking_success: bool
     safety_failure: bool
+    target_state_index: int
+    path_mode_index: int
+    collision_profile_id: str
+
+    @property
+    def success(self) -> bool:
+        """课程窗口使用的成功信号；保留只读别名便于统计调用。"""
+
+        return self.curriculum_success and not self.safety_failure
 
 
 @dataclass(frozen=True)
@@ -99,6 +109,24 @@ class CurriculumController:
                 raise ValueError(f"课程等级 {index} 的目标分布无效")
             if abs(sum(level_cfg.target_state_probabilities) - 1.0) > 1e-6:
                 raise ValueError(f"课程等级 {index} 的目标分布必须归一化")
+            if len(level_cfg.path_mode_probabilities) != 3 or any(
+                value < 0.0 for value in level_cfg.path_mode_probabilities
+            ):
+                raise ValueError(f"课程等级 {index} 的路径模式分布无效")
+            if abs(sum(level_cfg.path_mode_probabilities) - 1.0) > 1e-6:
+                raise ValueError(f"课程等级 {index} 的路径模式分布必须归一化")
+            if len(level_cfg.tcp_action_mask) != 6 or any(
+                value not in (0.0, 1.0) for value in level_cfg.tcp_action_mask
+            ):
+                raise ValueError(f"课程等级 {index} 的 TCP 动作掩码必须为六维二值")
+            if len(level_cfg.collision_clearance_enabled_mask) != 3 or any(
+                value not in (0.0, 1.0) for value in level_cfg.collision_clearance_enabled_mask
+            ):
+                raise ValueError(f"课程等级 {index} 的碰撞净空掩码必须为三维二值")
+            if level_cfg.collision_profile_id not in {item.identifier for item in CURRICULUM_COLLISION_PROFILES}:
+                raise ValueError(f"课程等级 {index} 引用了未知碰撞配置档")
+            if not 0.0 <= level_cfg.previous_level_sampling_probability <= 1.0:
+                raise ValueError(f"课程等级 {index} 的上一阶段回归采样比例无效")
         for index, values in list(self.windows.items()):
             self.windows[index] = deque(values, maxlen=transition.rolling_window_episodes)
 
@@ -111,12 +139,22 @@ class CurriculumController:
         for result in values:
             if not 0 <= result.level < len(self.config.levels):
                 raise ValueError("episode 归属等级超出配置范围")
+            if not 0 <= result.target_state_index < 4:
+                raise ValueError("episode 目标状态索引超出配置范围")
+            if not 0 <= result.path_mode_index < 3:
+                raise ValueError("episode 路径模式索引超出配置范围")
+            if result.collision_profile_id != self.config.levels[result.level].collision_profile_id:
+                raise ValueError("episode 碰撞配置档与归属等级不一致")
             window = self.windows.setdefault(result.level, deque(maxlen=self.config.transition.rolling_window_episodes))
             window.append(
                 EpisodeResult(
                     level=result.level,
-                    success=bool(result.success and not result.safety_failure),
+                    curriculum_success=bool(result.curriculum_success and not result.safety_failure),
+                    formal_parking_success=bool(result.formal_parking_success and not result.safety_failure),
                     safety_failure=bool(result.safety_failure),
+                    target_state_index=int(result.target_state_index),
+                    path_mode_index=int(result.path_mode_index),
+                    collision_profile_id=str(result.collision_profile_id),
                 )
             )
         self.cooldown_remaining = max(0, self.cooldown_remaining - len(values))
@@ -157,11 +195,20 @@ class CurriculumController:
 
         return {
             "config_version": self.config.version,
+            "observation_schema_version": self.config.observation_schema_version,
             "level": self.level,
             "cooldown_remaining": self.cooldown_remaining,
             "windows": {
                 str(level): [
-                    {"level": item.level, "success": item.success, "safety_failure": item.safety_failure}
+                    {
+                        "level": item.level,
+                        "curriculum_success": item.curriculum_success,
+                        "formal_parking_success": item.formal_parking_success,
+                        "safety_failure": item.safety_failure,
+                        "target_state_index": item.target_state_index,
+                        "path_mode_index": item.path_mode_index,
+                        "collision_profile_id": item.collision_profile_id,
+                    }
                     for item in window
                 ]
                 for level, window in self.windows.items()
@@ -183,6 +230,8 @@ class CurriculumController:
     def from_snapshot(cls, config: CurriculumCfg, snapshot: dict[str, object]) -> CurriculumController:
         if snapshot.get("config_version") != config.version:
             raise ValueError("课程状态配置版本与当前配置不一致")
+        if snapshot.get("observation_schema_version") != config.observation_schema_version:
+            raise ValueError("课程状态观测 schema 版本与当前配置不一致")
         raw_windows = snapshot.get("windows", {})
         if not isinstance(raw_windows, dict):
             raise ValueError("课程状态 windows 格式无效")
@@ -190,9 +239,12 @@ class CurriculumController:
         for key, entries in raw_windows.items():
             if not isinstance(entries, list):
                 raise ValueError("课程状态窗口条目无效")
-            windows[int(key)] = deque(
-                (EpisodeResult(**entry) for entry in entries), maxlen=config.transition.rolling_window_episodes
-            )
+            try:
+                windows[int(key)] = deque(
+                    (EpisodeResult(**entry) for entry in entries), maxlen=config.transition.rolling_window_episodes
+                )
+            except (TypeError, ValueError) as error:
+                raise ValueError("课程状态窗口条目与当前版本不兼容") from error
         controller = cls(
             config=config,
             level=int(snapshot["level"]),

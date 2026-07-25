@@ -8,11 +8,11 @@ from typing import Final
 FINAL_TASK_THRESHOLDS_ARE_IMMUTABLE: Final = True
 """课程不得修改 ``configs.task`` 中的停靠或安全真值。"""
 
-CURRICULUM_CONFIG_VERSION: Final = "stage-e-v1-provisional"
-"""阶段 D 尚无足量 PPO 基线，门槛须在首次正式训练前复核。"""
+CURRICULUM_CONFIG_VERSION: Final = "curriculum-v2-p3"
+"""P3 已接入阶段 1 的动作掩码、路径约束与 C1 接触范围。"""
 
-CURRICULUM_V2_SCHEMA_VERSION: Final = "curriculum-v2-p0"
-"""P0 冻结的下一代策略接口版本；尚未接入当前阶段 E 训练行为。"""
+CURRICULUM_V2_SCHEMA_VERSION: Final = "curriculum-v2-p3"
+"""P3 保持形状不变、但已实际执行的固定策略观测接口版本。"""
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,29 @@ class AuxiliaryRewardScales:
     low_speed_parking: float = 1.0
     first_entry: float = 1.0
     tool_axis_progress: float = 1.0
+    path_reference_progress: float = 1.0
+    path_reference_reached: float = 1.0
+
+
+@dataclass(frozen=True)
+class StageSuccessCfg:
+    """课程阶段成功门槛；不替代 ``configs.task`` 的正式停车真值。"""
+
+    max_position_error_m: float
+    max_tcp_speed_m_s: float
+    required_dwell_steps: int
+    max_orientation_error_rad: float | None = None
+    require_formal_parking_success: bool = False
+    require_path_reference_reached: bool = False
+
+
+@dataclass(frozen=True)
+class CollisionProfileCfg:
+    """课程碰撞档的身份和接触过滤范围；不修改 USD 的 CollisionAPI。"""
+
+    identifier: str
+    one_hot_index: int
+    filter_prim_paths_expr: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -33,7 +56,13 @@ class CurriculumLevelCfg:
     """一个等级可控制的训练分布和辅助奖励，不含任务真值。"""
 
     target_state_probabilities: tuple[float, float, float, float]
+    path_mode_probabilities: tuple[float, float, float]
+    tcp_action_mask: tuple[float, float, float, float, float, float]
+    collision_profile_id: str
+    collision_clearance_enabled_mask: tuple[float, float, float]
     auxiliary_rewards: AuxiliaryRewardScales
+    stage_success: StageSuccessCfg
+    previous_level_sampling_probability: float = 0.0
     approved_randomization: tuple[str, ...] = ()
 
 
@@ -53,6 +82,7 @@ class CurriculumTransitionCfg:
 @dataclass(frozen=True)
 class CurriculumCfg:
     version: str
+    observation_schema_version: str
     levels: tuple[CurriculumLevelCfg, ...]
     transition: CurriculumTransitionCfg
 
@@ -95,6 +125,26 @@ CURRICULUM_V2_PATH_MODES: Final = (
     PathModeCfg("lateral_negative", 2, 1.0 / 3.0, (0.0, -0.12, 0.0)),
 )
 
+CURRICULUM_COLLISION_PROFILES: Final = (
+    CollisionProfileCfg(
+        "C1", 0, ("{ENV_REGEX_NS}/station/static/workstation/WorkStation/Glass/M_Glass",)
+    ),
+    CollisionProfileCfg(
+        "C2", 1, ("{ENV_REGEX_NS}/station/static/workstation/WorkStation/WorkStation/M_WorkStation",)
+    ),
+    CollisionProfileCfg(
+        "C3",
+        2,
+        (
+            "{ENV_REGEX_NS}/station/static/workstation/WorkStation/Glass/M_Glass",
+            "{ENV_REGEX_NS}/station/static/workstation/WorkStation/WorkStation/M_WorkStation",
+        ),
+    ),
+)
+
+PATH_REFERENCE_REACH_TOLERANCE_M: Final = 0.04
+"""阶段 1 中段参考点的到达容差；独立于最终停车阈值。"""
+
 
 CURRICULUM_V2_OBSERVATION_SCHEMA: Final = (
     # 当前 29 维字段保持原有语义，避免把阶段 E checkpoint 误接入新谱系。
@@ -127,28 +177,73 @@ CURRICULUM_V2_OUTCOME_SCHEMA: Final = CurriculumOutcomeSchemaCfg(
 
 CURRICULUM_CFG: Final = CurriculumCfg(
     version=CURRICULUM_CONFIG_VERSION,
+    observation_schema_version=CURRICULUM_V2_SCHEMA_VERSION,
     levels=(
         CurriculumLevelCfg(
             target_state_probabilities=(1.0, 0.0, 0.0, 0.0),
+            path_mode_probabilities=(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0),
+            tcp_action_mask=(1.0, 1.0, 1.0, 0.0, 0.0, 0.0),
+            collision_profile_id="C1",
+            collision_clearance_enabled_mask=(0.0, 0.0, 0.0),
             auxiliary_rewards=AuxiliaryRewardScales(
                 inner_docking_quality=0.25, low_speed_parking=0.25, tool_axis_progress=0.0
             ),
+            stage_success=StageSuccessCfg(0.08, 0.08, 2, require_path_reference_reached=True),
         ),
         CurriculumLevelCfg(
             target_state_probabilities=(1.0, 0.0, 0.0, 0.0),
+            path_mode_probabilities=(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0),
+            tcp_action_mask=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+            collision_profile_id="C1",
+            collision_clearance_enabled_mask=(0.0, 0.0, 0.0),
             auxiliary_rewards=AuxiliaryRewardScales(low_speed_parking=0.5, tool_axis_progress=1.0),
-        ),
-        CurriculumLevelCfg(
-            target_state_probabilities=(1.0, 0.0, 0.0, 0.0),
-            auxiliary_rewards=AuxiliaryRewardScales(),
-        ),
-        CurriculumLevelCfg(
-            target_state_probabilities=(0.25, 0.25, 0.25, 0.25),
-            auxiliary_rewards=AuxiliaryRewardScales(),
+            stage_success=StageSuccessCfg(
+                0.06, 0.06, 2, max_orientation_error_rad=0.3490658503988659, require_path_reference_reached=True
+            ),
+            previous_level_sampling_probability=0.25,
         ),
         CurriculumLevelCfg(
             target_state_probabilities=(0.25, 0.25, 0.25, 0.25),
+            path_mode_probabilities=(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0),
+            tcp_action_mask=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+            collision_profile_id="C2",
+            collision_clearance_enabled_mask=(0.0, 0.0, 0.0),
             auxiliary_rewards=AuxiliaryRewardScales(),
+            stage_success=StageSuccessCfg(
+                0.05, 0.05, 2, max_orientation_error_rad=0.2617993877991494, require_path_reference_reached=True
+            ),
+            previous_level_sampling_probability=0.25,
+        ),
+        CurriculumLevelCfg(
+            target_state_probabilities=(0.25, 0.25, 0.25, 0.25),
+            path_mode_probabilities=(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0),
+            tcp_action_mask=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+            collision_profile_id="C3",
+            # P4 接入并验证几何最近点前，三个净空字段均视为未启用。
+            collision_clearance_enabled_mask=(0.0, 0.0, 0.0),
+            auxiliary_rewards=AuxiliaryRewardScales(),
+            stage_success=StageSuccessCfg(
+                0.05, 0.05, 2, max_orientation_error_rad=0.2617993877991494, require_path_reference_reached=True
+            ),
+            previous_level_sampling_probability=0.25,
+        ),
+        CurriculumLevelCfg(
+            target_state_probabilities=(0.25, 0.25, 0.25, 0.25),
+            path_mode_probabilities=(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0),
+            tcp_action_mask=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+            collision_profile_id="C3",
+            # P4 接入并验证几何最近点前，三个净空字段均视为未启用。
+            collision_clearance_enabled_mask=(0.0, 0.0, 0.0),
+            auxiliary_rewards=AuxiliaryRewardScales(),
+            stage_success=StageSuccessCfg(
+                0.04,
+                0.03,
+                2,
+                max_orientation_error_rad=0.17453292519943295,
+                require_formal_parking_success=True,
+                require_path_reference_reached=True,
+            ),
+            previous_level_sampling_probability=0.25,
             # 尚无经资产/接触验证批准的物理随机化，故明确保持为空。
             approved_randomization=(),
         ),
